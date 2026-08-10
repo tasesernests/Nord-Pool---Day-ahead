@@ -30,7 +30,7 @@ jobs:
         run: pip install requests
 
       - name: Fetch latest prices
-        run: python nordpool_lv.py daily --out data/nordpool_prices.csv --source elering
+        run: python nordpool_lv.py daily --out data/nordpool_prices.csv --source elering --source elering
 
       - name: Build Excel-friendly files
         run: |
