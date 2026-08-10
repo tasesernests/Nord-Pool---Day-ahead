@@ -181,21 +181,41 @@ def fetch_nordpool(date: dt.date, areas: list[str], currency: str) -> list[dict]
 # source: elering (open Baltic API, no key, good cross-check / fallback)
 # --------------------------------------------------------------------------
 
-def fetch_elering(start: dt.date, end: dt.date, areas: list[str]) -> list[dict]:
-    """Elering serves the whole range in one call. Prices are EUR/MWh."""
+ELERING_CHUNK_DAYS = 180   # a full year works, but 400s appear on multi-year spans
+
+
+def _elering_chunk(start: dt.date, end: dt.date, areas: list[str]) -> list[dict]:
+    """One request. `end` is exclusive here — the caller handles the +1 day."""
     payload = get_json(ELERING_URL, {
         "start": f"{start.isoformat()}T00:00:00.000Z",
-        "end": f"{(end + dt.timedelta(days=1)).isoformat()}T00:00:00.000Z",
+        "end": f"{end.isoformat()}T00:00:00.000Z",
     })
     if not payload or not payload.get("data"):
         return []
 
     now = dt.datetime.now(dt.timezone.utc).isoformat()
     rows = []
+
     for area in areas:
-        for point in payload["data"].get(area.lower(), []):
+        points = payload["data"].get(area.lower(), [])
+        if not points:
+            continue
+
+        # Resolution is not stated in the response and changed with the EU's
+        # move to 15-minute market time units, so infer it from the gap to the
+        # next point. The final point inherits the previous gap.
+        stamps = [p["timestamp"] for p in points]
+        gaps = [
+            stamps[i + 1] - stamps[i] if i + 1 < len(stamps) else None
+            for i in range(len(stamps))
+        ]
+        for i in range(len(gaps) - 1, -1, -1):
+            if gaps[i] is None or gaps[i] <= 0:
+                gaps[i] = gaps[i + 1] if i + 1 < len(gaps) else 3600
+
+        for point, gap in zip(points, gaps):
             start_dt = dt.datetime.fromtimestamp(point["timestamp"], dt.timezone.utc)
-            end_dt = start_dt + dt.timedelta(hours=1)
+            end_dt = start_dt + dt.timedelta(seconds=gap)
             rows.append({
                 "delivery_start_utc": start_dt.isoformat(),
                 "delivery_end_utc": end_dt.isoformat(),
@@ -203,10 +223,31 @@ def fetch_elering(start: dt.date, end: dt.date, areas: list[str]) -> list[dict]:
                 "area": area.upper(),
                 "price": point["price"],
                 "currency": "EUR",
-                "resolution_min": 60,
+                "resolution_min": gap // 60,
                 "source": "elering",
                 "fetched_at_utc": now,
             })
+    return rows
+
+
+def fetch_elering(start: dt.date, end: dt.date, areas: list[str]) -> list[dict]:
+    """
+    Elering rejects very long spans with a 400, so split the range into chunks.
+    Overlapping seams are harmless — append_rows dedupes on the timestamp.
+    """
+    stop = end + dt.timedelta(days=1)       # make the range inclusive of `end`
+    rows: list[dict] = []
+    cursor = start
+
+    while cursor < stop:
+        chunk_end = min(cursor + dt.timedelta(days=ELERING_CHUNK_DAYS), stop)
+        got = _elering_chunk(cursor, chunk_end, areas)
+        print(f"  {cursor} .. {chunk_end - dt.timedelta(days=1)}  {len(got):>6} rows")
+        rows.extend(got)
+        cursor = chunk_end
+        if cursor < stop:
+            time.sleep(1.0)
+
     return rows
 
 
