@@ -1,0 +1,49 @@
+# Save this at:  .github/workflows/daily-prices.yml
+#
+# Runs the scraper every day on GitHub's servers and commits the updated CSVs
+# back to the repo. Free for public repos; private repos use free-tier minutes
+# (this job takes well under a minute).
+
+name: Nord Pool LV daily
+
+on:
+  schedule:
+    # 12:00 UTC = 15:00 in Riga. Nord Pool publishes next-day results around
+    # 12:45 CET (10:45 UTC), so this is comfortably after.
+    - cron: "0 12 * * *"
+  workflow_dispatch:        # adds a "Run workflow" button for manual runs
+
+permissions:
+  contents: write           # required so the job can push the updated CSV
+
+jobs:
+  fetch:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        run: pip install requests
+
+      - name: Fetch latest prices
+        run: python nordpool_lv.py daily --out data/nordpool_prices.csv --source elering
+
+      - name: Build Excel-friendly files
+        run: |
+          python make_excel_csv.py \
+            data/nordpool_prices.csv \
+            data/prices_riga.csv \
+            --hourly data/prices_riga_hourly.csv
+
+      - name: Commit if anything changed
+        run: |
+          git config user.name  "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add data/
+          git diff --staged --quiet && echo "no new data" && exit 0
+          git commit -m "prices: $(date -u +%Y-%m-%d)"
+          git push
